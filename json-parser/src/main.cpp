@@ -27,7 +27,8 @@ int main(int argc, char* argv[]) {
       "empty_string": "",
       "null_value": null,
       "boolean_true": true,
-      "boolean_false": false
+      "boolean_false": false,
+      "vv": [ 42, -17, 0, 3.14159, -2.71828, 1e10, -5e-3, 6.022e23, -1.6e-19, 1.0, -0, 9007199254740991, -9007199254740991, 123.456e789, -123.456e-789 ]
     })";
   spdlog::info("input = {}", input);
 

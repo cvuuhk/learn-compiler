@@ -12,7 +12,6 @@ class JsonLexer {
   enum class State {
     INIT,
     IN_STRING,
-    IN_NUMBER,
     IN_TRUE,
     IN_FALSE,
     IN_NULL,
@@ -20,7 +19,18 @@ class JsonLexer {
     IN_UNICODE_ESCAPE,
     AFTER_HIGH_SURROGATE,
     BEFORE_LOW_SURROGATE,
-    IN_LOW_SURROGATE
+    IN_LOW_SURROGATE,
+
+    AFTER_NUMBER_INTEGER_SIGN,
+    AFTER_NUMBER_LEADING_ZERO,
+    IN_NUMBER_INTEGER,
+    AFTER_NUMBER_INTEGER,
+    AFTER_NUMBER_POINT,
+    IN_NUMBER_FRACTION_DIGIT,
+    AFTER_NUMBER_FRACTION,
+    IN_NUMBER_EXPONENT,
+    AFTER_NUMBER_EXPONENT_SIGN,
+    IN_NUMBER_EXPONENT_DIGIT,
   };
 
   public:
@@ -31,7 +41,7 @@ class JsonLexer {
     std::string buffer, unicodeBuffer;
     unicodeBuffer.reserve(4);
     size_t i = 0;
-    uint32_t highSurrogate;
+    uint32_t highSurrogate = 0;
     while (i < input.length()) {
       char c = input[i++];
       switch (state) {
@@ -50,8 +60,14 @@ class JsonLexer {
             tokens.push_back(std::make_unique<ArrayEndToken>());
           } else if (c == '"') {
             state = State::IN_STRING;
+          } else if (c == '-') {
+            state = State::AFTER_NUMBER_INTEGER_SIGN;
+            buffer += c;
+          } else if (c == '0') {
+            state = State::AFTER_NUMBER_LEADING_ZERO;
+            buffer += c;
           } else if (util::isDigit(c)) {
-            state = State::IN_NUMBER;
+            state = State::IN_NUMBER_INTEGER;
             buffer += c;
           } else if (c == 't') {
             state = State::IN_TRUE;
@@ -69,6 +85,109 @@ class JsonLexer {
             exit(1);
           }
           break;
+        case State::AFTER_NUMBER_INTEGER_SIGN:
+          if (c == '0') {
+            state = State::AFTER_NUMBER_LEADING_ZERO;
+            buffer += c;
+          } else if (util::isDigit(c)) {
+            state = State::IN_NUMBER_INTEGER;
+            buffer += c;
+          } else {
+            spdlog::info("负号后面紧跟的不是数字：{}", c);
+            exit(1);
+          }
+          break;
+        case State::AFTER_NUMBER_LEADING_ZERO:
+          if (util::isDigit(c)) {
+            spdlog::info("前导零非法：{}{}", buffer, c);
+            exit(1);
+          } else {
+            state = State::AFTER_NUMBER_INTEGER;
+            i--;
+          }
+          break;
+        case State::IN_NUMBER_INTEGER:
+          if (util::isDigit(c)) {
+            buffer += c;
+          } else {
+            state = State::AFTER_NUMBER_INTEGER;
+            i--;
+          }
+          break;
+        case State::AFTER_NUMBER_INTEGER:
+          if (c == '.') {
+            state = State::AFTER_NUMBER_POINT;
+            buffer += c;
+          } else if (c == 'e' || c == 'E') {
+            state = State::IN_NUMBER_EXPONENT;
+            buffer += c;
+          } else {
+            state = State::INIT;
+            i--;
+            tokens.push_back(std::make_unique<NumberToken>(buffer));
+            buffer.clear();
+          }
+          break;
+        case State::AFTER_NUMBER_POINT:
+          if (util::isDigit(c)) {
+            state = State::IN_NUMBER_FRACTION_DIGIT;
+            buffer += c;
+          } else {
+            spdlog::info("小数点后面紧跟的不是数字：{}", c);
+            exit(1);
+          }
+          break;
+        case State::IN_NUMBER_FRACTION_DIGIT:
+          if (util::isDigit(c)) {
+            state = State::IN_NUMBER_FRACTION_DIGIT;
+            buffer += c;
+          } else {
+            state = State::AFTER_NUMBER_FRACTION;
+            i--;
+          }
+          break;
+        case State::AFTER_NUMBER_FRACTION:
+          if (c == 'e' || c == 'E') {
+            state = State::IN_NUMBER_EXPONENT;
+            buffer += c;
+          } else {
+            state = State::INIT;
+            i--;
+            tokens.push_back(std::make_unique<NumberToken>(buffer));
+            buffer.clear();
+          }
+          break;
+        case State::IN_NUMBER_EXPONENT:
+          if (c == '-' || c == '+') {
+            state = State::AFTER_NUMBER_EXPONENT_SIGN;
+            buffer += c;
+          } else if(util::isDigit(c)) {
+            state = State::IN_NUMBER_EXPONENT_DIGIT;
+            buffer += c;
+          } else {
+            spdlog::info("非数字：{}", c);
+            exit(1);
+          }
+          break;
+        case State::AFTER_NUMBER_EXPONENT_SIGN:
+          if (util::isDigit(c)) {
+            state = State::IN_NUMBER_EXPONENT_DIGIT;
+            buffer += c;
+          } else {
+            spdlog::info("非数字：{}", c);
+            exit(1);
+          }
+          break;
+        case State::IN_NUMBER_EXPONENT_DIGIT:
+          if (util::isDigit(c)) {
+            buffer += c;
+          } else {
+            state = State::INIT;
+            i--;
+            tokens.push_back(std::make_unique<NumberToken>(buffer));
+            buffer.clear();
+          }
+          break;
         case State::IN_STRING:
           if (c == '"') {
             state = State::INIT;
@@ -78,17 +197,6 @@ class JsonLexer {
             state = State::IN_ESCAPE;
           } else {
             buffer += c;
-          }
-          break;
-        case State::IN_NUMBER:
-          // todo: 暂仅做简单支持
-          if (util::isDigit(c)) {
-            buffer += c;
-          } else {
-            state = State::INIT;
-            tokens.push_back(std::make_unique<NumberToken>(buffer));
-            buffer.clear();
-            i--;
           }
           break;
         case State::IN_TRUE:
@@ -231,19 +339,39 @@ class JsonLexer {
       }
     }
 
+    if (!unicodeBuffer.empty()) {
+      spdlog::info("不完整的 unicode 转义序列：{}", unicodeBuffer);
+      exit(1);
+    }
+    if (highSurrogate != 0) {
+      spdlog::info("未配对的 unicode 转义序列");
+      exit(1);
+    }
+
     if (buffer.empty()) {
       return tokens;
     }
 
     switch (state) {
-      case State::IN_NUMBER:
+      case State::AFTER_NUMBER_INTEGER_SIGN:
+      case State::AFTER_NUMBER_POINT:
+      case State::IN_NUMBER_EXPONENT:
+      case State::AFTER_NUMBER_EXPONENT_SIGN:
+        spdlog::info("非法的数值：{}", buffer);
+        exit(1);
+      case State::AFTER_NUMBER_LEADING_ZERO:
+      case State::IN_NUMBER_INTEGER:
+      case State::AFTER_NUMBER_INTEGER:
+      case State::IN_NUMBER_FRACTION_DIGIT:
+      case State::AFTER_NUMBER_FRACTION:
+      case State::IN_NUMBER_EXPONENT_DIGIT:
         tokens.push_back(std::make_unique<NumberToken>(buffer));
         buffer.clear();
         break;
       case State::IN_TRUE:
       case State::IN_FALSE:
       case State::IN_NULL:
-        spdlog::info("不全的布尔值：{}", buffer);
+        spdlog::info("不全的关键字：{}", buffer);
         exit(1);
       default:
         spdlog::info("未闭合的字符串：{}", buffer);
